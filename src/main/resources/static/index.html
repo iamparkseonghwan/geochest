@@ -195,7 +195,7 @@
 				body: JSON.stringify({ owner: username })
 			});
 			if (!res.ok) {
-				const msg = await res.text();
+				const msg = await res.json();
 				alert(msg || '보유에 실패했습니다.');
 				return;
 			}
@@ -217,7 +217,7 @@
 				body: JSON.stringify({ owner: username })
 			});
 			if (!res.ok) {
-				const msg = await res.text();
+				const msg = await res.json();
 				alert(msg || '구매에 실패했습니다.');
 				return;
 			}
@@ -373,7 +373,7 @@
 		try {
 			const res = await fetch(`${API_BASE}/reset`, { method: 'POST' });
 			if (!res.ok) {
-				const msg = await res.text();
+				const msg = await res.json();
 				alert(msg || '초기화에 실패했습니다.');
 				return;
 			}

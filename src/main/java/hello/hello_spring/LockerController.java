@@ -72,22 +72,25 @@ public class LockerController {
             return ResponseEntity.badRequest().body("없는 사물함입니다.");
         }
 
-        if (locker.getStatus() == LockerStatus.SOLD) {
-            return ResponseEntity.badRequest().body("이미 판매된 사물함입니다.");
-        }
-
-        if (locker.getStatus() == LockerStatus.HELD) {
-            // 혹시 만료 시간이 이미 지났으면 AVAILABLE로 돌리고 다시 진행
-            if (locker.getHoldExpiresAt() != null &&
-                    locker.getHoldExpiresAt().isAfter(Instant.now())) {
-                return ResponseEntity.badRequest().body("이미 다른 사람이 선점 중입니다.");
+        // synchronized 블록 추가
+        synchronized (locker) {
+            if (locker.getStatus() == LockerStatus.SOLD) {
+                return ResponseEntity.badRequest().body("이미 판매된 사물함입니다.");
             }
-        }
 
-        locker.setStatus(LockerStatus.HELD);
-        locker.setOwner(req.getOwner());
-        // 예시: 60초 동안만 보유
-        locker.setHoldExpiresAt(Instant.now().plusSeconds(60));
+            if (locker.getStatus() == LockerStatus.HELD) {
+                // 혹시 만료 시간이 이미 지났으면 AVAILABLE로 돌리고 다시 진행
+                if (locker.getHoldExpiresAt() != null &&
+                        locker.getHoldExpiresAt().isAfter(Instant.now())) {
+                    return ResponseEntity.badRequest().body("이미 다른 사람이 선점 중입니다.");
+                }
+            }
+
+            locker.setStatus(LockerStatus.HELD);
+            locker.setOwner(req.getOwner());
+            // 예시: 60초 동안만 보유
+            locker.setHoldExpiresAt(Instant.now().plusSeconds(60));
+        }
 
         return ResponseEntity.ok(toDto(locker));
     }
@@ -103,17 +106,20 @@ public class LockerController {
             return ResponseEntity.badRequest().body("없는 사물함입니다.");
         }
 
-        if (locker.getStatus() != LockerStatus.HELD) {
-            return ResponseEntity.badRequest().body("선점되지 않은 사물함입니다.");
-        }
+        // synchronized 블록 추가
+        synchronized (locker) {
+            if (locker.getStatus() != LockerStatus.HELD) {
+                return ResponseEntity.badRequest().body("선점되지 않은 사물함입니다.");
+            }
 
-        // 본인이 hold한 좌석인지 확인
-        if (locker.getOwner() == null || !locker.getOwner().equals(req.getOwner())) {
-            return ResponseEntity.badRequest().body("이 사물함은 다른 사람이 선점했습니다.");
-        }
+            // 본인이 hold한 좌석인지 확인
+            if (locker.getOwner() == null || !locker.getOwner().equals(req.getOwner())) {
+                return ResponseEntity.badRequest().body("이 사물함은 다른 사람이 선점했습니다.");
+            }
 
-        locker.setStatus(LockerStatus.SOLD);
-        locker.setHoldExpiresAt(null);
+            locker.setStatus(LockerStatus.SOLD);
+            locker.setHoldExpiresAt(null);
+        }
 
         return ResponseEntity.ok(toDto(locker));
     }

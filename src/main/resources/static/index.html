@@ -80,277 +80,343 @@
 	</div>
 </div>
 
-<footer>현 상태는 브라우저 탭 간 BroadcastChannel로 동기화됩니다.</footer>
+<footer>좌석 상태는 서버를 통해 여러 기기에서 공유됩니다.</footer>
 
 <script>
-	// 설정
-	const LOCKER_COUNT = 60;
-	const HOLD_MS = 30_000; // 30초 보유
-	const STORAGE_KEY = 'locker_state_v1';
+	// 서버 기반 사물함 티켓팅 (여러 기기 동기화용)
+	const API_BASE = '/api/lockers';
+	const HOLD_MS = 30_000; // 30초 보유 (백엔드와 동일하게 맞춰두기)
 
-	// 상태
-	let lockers = [];
+	let lockers = [];          // { id, status: 'available'|'held'|'sold', owner, holdExpires }
 	let username = '';
 	let isAdmin = false;
 	const ADMIN_PASSWORD = 'admin123';
-	const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('lockers_channel') : null;
 
-	// 초기화
-	function init() {
-		loadState();
-		renderLockers();
-		// username from localStorage
-		const savedName = localStorage.getItem('locker_username');
-		if (savedName) document.getElementById('username').value = savedName;
-
-		document.getElementById('username').addEventListener('change', e=>{ localStorage.setItem('locker_username', e.target.value); username = e.target.value; });
-		document.getElementById('findBest').addEventListener('click', onFindBest);
-		document.getElementById('adminBtn').addEventListener('click', onAdminBtn);
-		document.getElementById('modalCancel').addEventListener('click', ()=>hideModal());
-		document.getElementById('modalConfirm').addEventListener('click', onModalConfirm);
-
-		document.getElementById('adminCancel').addEventListener('click', ()=>hideAdminPanel());
-		document.getElementById('adminSave').addEventListener('click', onAdminSave);
-		document.getElementById('adminResetAction').addEventListener('click', onAdminResetAction);
-
-		if (bc) bc.onmessage = msg => { if (msg.data && msg.data.type === 'update') mergeRemote(msg.data.state); };
-
-		// tick: expire holds and update timers
-		setInterval(tick, 1000);
-		updateStats();
+	// DTO -> 프론트 모델 변환
+	function mapFromDto(d) {
+		return {
+			id: d.id,
+			status: (d.status || 'AVAILABLE').toLowerCase(),
+			owner: d.owner || null,
+			holdExpires: d.holdExpiresAt || null
+		};
 	}
 
-	function createInitial() {
-		lockers = Array.from({length: LOCKER_COUNT}, (_,i)=>({
-			id: i+1,
-			status: 'available',
-			owner: null,
-			holdExpires: null
-		}));
-		saveState();
-	}
-
-	function loadState(){
-		const raw = localStorage.getItem(STORAGE_KEY);
-		if (!raw) { createInitial(); return; }
+	// 서버에서 현재 상태 불러오기
+	async function loadState() {
 		try {
-			lockers = JSON.parse(raw);
-			// sanitize length
-			if (!Array.isArray(lockers) || lockers.length !== LOCKER_COUNT) createInitial();
-		} catch(e){ createInitial(); }
-	}
-
-	function saveState() {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(lockers));
-		if (bc) bc.postMessage({type:'update', state: lockers});
-		updateStats();
-	}
-
-	function mergeRemote(remote){
-		// Simple merge: choose latest holdExpires or sold state
-		let changed = false;
-		for (let r of remote){
-			const local = lockers[r.id-1];
-			if (!local) continue;
-			// If remote is sold and local not sold -> accept sold
-			if (r.status === 'sold' && local.status !== 'sold') { lockers[r.id-1] = r; changed = true; continue; }
-			// If local sold, keep local
-			if (local.status === 'sold') continue;
-			// If remote held and later expiry, accept remote
-			if (r.status === 'held'){
-				if (local.status !== 'held' || (r.holdExpires && r.holdExpires > (local.holdExpires||0))){ lockers[r.id-1] = r; changed = true; }
+			const res = await fetch(API_BASE);
+			if (!res.ok) {
+				console.error('서버에서 좌석 정보를 가져오지 못했습니다.');
+				return;
 			}
-			// If remote available and local held by expired -> adopt available
-			if (r.status === 'available' && local.status !== 'sold'){
-				if (local.status !== 'available'){ lockers[r.id-1] = r; changed = true; }
-			}
+			const data = await res.json();
+			lockers = data.map(mapFromDto);
+			renderLockers();
+			updateStats();
+		} catch (e) {
+			console.error('loadState 오류', e);
 		}
-		if (changed){ saveState(); renderLockers(); }
 	}
 
-	function tick(){
-		const now = Date.now();
-		let changed = false;
-		for (let l of lockers){
-			if (l.status === 'held' && l.holdExpires && now >= l.holdExpires){
-				l.status = 'available'; l.owner = null; l.holdExpires = null; changed = true;
-			}
-		}
-		if (changed) { saveState(); renderLockers(); }
-		// update countdown displays
-		document.querySelectorAll('.locker').forEach(el=>{
-			const id = +el.dataset.id;
-			const l = lockers[id-1];
-			const s = el.querySelector('.status');
-			if (l.status === 'held' && l.holdExpires){
-				const sec = Math.max(0, Math.ceil((l.holdExpires - Date.now())/1000));
-				s.textContent = `보유: ${sec}s`;
-			}
-		});
-	}
-
-	function renderLockers(){
+	function renderLockers() {
 		const grid = document.getElementById('grid');
 		grid.innerHTML = '';
-		for (let l of lockers){
+		for (let l of lockers) {
 			const el = document.createElement('div');
 			el.className = `locker ${l.status}`;
 			el.dataset.id = l.id;
 			el.innerHTML = `<div class="num">#${l.id}</div><div class="status">${statusText(l)}</div>`;
-			el.addEventListener('click', ()=>onLockerClick(l.id));
+			el.addEventListener('click', () => onLockerClick(l.id));
 			grid.appendChild(el);
 		}
 		updateStats();
 	}
 
-	function statusText(l){
+	function statusText(l) {
 		if (l.status === 'available') return '사용 가능';
-		if (l.status === 'sold') return `구매됨 (${l.owner||'—'})`;
-		if (l.status === 'held'){
-			const sec = Math.max(0, Math.ceil((l.holdExpires - Date.now())/1000));
-			return `보유 중 (${l.owner||'—'}) ${sec}s`;
+		if (l.status === 'sold') return `구매됨 (${l.owner || '—'})`;
+		if (l.status === 'held') {
+			const sec = remainingSeconds(l);
+			return `보유 중 (${l.owner || '—'}) ${sec}s`;
 		}
 		return '';
 	}
 
-	// Helper: 현재 사용자가 보유 중인 활성 보유가 있는지 확인
-	function userHasActiveHold(name){
-		if (!name) return null;
-		const now = Date.now();
-		return lockers.find(l => l.status === 'held' && l.owner === name && l.holdExpires && l.holdExpires > now) || null;
+	function remainingSeconds(l) {
+		if (!l.holdExpires) return 0;
+		const sec = Math.max(0, Math.ceil((l.holdExpires - Date.now()) / 1000));
+		return sec;
 	}
 
-	function onLockerClick(id){
+	// 1초마다 카운트다운 텍스트만 갱신
+	function tick() {
+		document.querySelectorAll('.locker').forEach(el => {
+			const id = +el.dataset.id;
+			const l = lockers.find(x => x.id === id);
+			if (!l) return;
+			const s = el.querySelector('.status');
+			if (!s) return;
+			if (l.status === 'held' && l.holdExpires) {
+				const sec = remainingSeconds(l);
+				s.textContent = `보유 중 (${l.owner || '—'}) ${sec}s`;
+			} else {
+				s.textContent = statusText(l);
+			}
+		});
+	}
+
+	function updateStats() {
+		const total = lockers.length;
+		const sold = lockers.filter(l => l.status === 'sold').length;
+		const held = lockers.filter(l => l.status === 'held').length;
+		document.getElementById('stats').textContent =
+			`총 ${total}개 · 판매 ${sold} · 보유 ${held}`;
+	}
+
+	// 현재 사용자가 유효한 보유를 가지고 있는지 확인
+	function userHasActiveHold(name) {
+		if (!name) return null;
+		const now = Date.now();
+		return lockers.find(l =>
+			l.status === 'held' &&
+			l.owner === name &&
+			l.holdExpires &&
+			l.holdExpires > now
+		) || null;
+	}
+
+	// 서버에 hold 요청
+	async function holdLocker(id) {
+		try {
+			const res = await fetch(`${API_BASE}/${id}/hold`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ owner: username })
+			});
+			if (!res.ok) {
+				const msg = await res.text();
+				alert(msg || '보유에 실패했습니다.');
+				return;
+			}
+			const d = await res.json();
+			const mapped = mapFromDto(d);
+			replaceLocker(mapped);
+		} catch (e) {
+			console.error('holdLocker 오류', e);
+			alert('보유 중 오류가 발생했습니다.');
+		}
+	}
+
+	// 서버에 buy 요청
+	async function buyLocker(id) {
+		try {
+			const res = await fetch(`${API_BASE}/${id}/buy`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ owner: username })
+			});
+			if (!res.ok) {
+				const msg = await res.text();
+				alert(msg || '구매에 실패했습니다.');
+				return;
+			}
+			const d = await res.json();
+			const mapped = mapFromDto(d);
+			replaceLocker(mapped);
+		} catch (e) {
+			console.error('buyLocker 오류', e);
+			alert('구매 중 오류가 발생했습니다.');
+		}
+	}
+
+	function replaceLocker(updated) {
+		const idx = lockers.findIndex(l => l.id === updated.id);
+		if (idx !== -1) lockers[idx] = updated;
+		else lockers.push(updated);
+		renderLockers();
+		updateStats();
+	}
+
+	// 사물함 클릭 처리
+	async function onLockerClick(id) {
 		// 관리자 모드면 편집 패널 열기
-		if (isAdmin){ showAdminPanel(id); return; }
+		if (isAdmin) {
+			showAdminPanel(id);
+			return;
+		}
 
 		username = document.getElementById('username').value.trim();
-		if (!username){ alert('먼저 이름을 입력하세요.'); return; }
-		const l = lockers[id-1];
-		// 사용자가 이미 다른 보유가 있으면 추가 보유 금지
+		if (!username) {
+			alert('먼저 이름을 입력하세요.');
+			return;
+		}
+
+		const l = lockers.find(x => x.id === id);
+		if (!l) return;
+
 		const existing = userHasActiveHold(username);
-		if (l.status === 'available'){
-			if (existing){
+
+		if (l.status === 'available') {
+			if (existing) {
 				alert('한 사람당 최대 1개만 보유할 수 있습니다.');
 				return;
 			}
-			l.status = 'held'; l.owner = username; l.holdExpires = Date.now() + HOLD_MS; saveState(); renderLockers();
-		} else if (l.status === 'held'){
-			if (l.owner === username){
-				// confirm purchase
+			await holdLocker(id);
+		} else if (l.status === 'held') {
+			if (l.owner === username) {
 				showModal([l.id]);
 			} else {
 				alert(`이미 ${l.owner}님이 보유 중입니다.`);
 			}
-		} else if (l.status === 'sold'){
-			alert(`이미 구매된 사물함입니다. (${l.owner})`);
+		} else if (l.status === 'sold') {
+			alert(`이미 구매된 사물함입니다. (${l.owner || '—'})`);
 		}
 	}
 
-	// 관리자 관련 함수
-	function onAdminBtn(){
-		const pass = prompt('관리자 비밀번호를 입력하세요');
-		if (pass === ADMIN_PASSWORD){ isAdmin = true; alert('관리자 모드 활성화되었습니다. 사물함을 클릭해 편집하세요.'); }
-		else alert('비밀번호가 올바르지 않습니다.');
-	}
-
-	function showAdminPanel(id){
-		document.getElementById('adminPanel').style.display = 'flex';
-		document.getElementById('adminLockerId').value = id;
-		const l = lockers[id-1];
-		document.getElementById('adminStatus').value = l.status;
-		document.getElementById('adminOwner').value = l.owner || '';
-		if (l.holdExpires) document.getElementById('adminHoldSec').value = Math.max(1, Math.ceil((l.holdExpires - Date.now())/1000));
-		else document.getElementById('adminHoldSec').value = '';
-	}
-
-	function hideAdminPanel(){ document.getElementById('adminPanel').style.display = 'none'; }
-
-	function onAdminSave(){
-		const id = parseInt(document.getElementById('adminLockerId').value,10);
-		const status = document.getElementById('adminStatus').value;
-		const owner = document.getElementById('adminOwner').value.trim() || null;
-		const holdSec = parseInt(document.getElementById('adminHoldSec').value,10);
-		const l = lockers[id-1];
-		if (!l) return;
-		if (status === 'available'){
-			l.status = 'available'; l.owner = null; l.holdExpires = null;
-		} else if (status === 'held'){
-			if (!owner){ alert('held 상태에는 소유자 이름이 필요합니다.'); return; }
-			l.status = 'held'; l.owner = owner; l.holdExpires = Date.now() + (isNaN(holdSec)? HOLD_MS : holdSec*1000);
-		} else if (status === 'sold'){
-			if (!owner){ alert('sold 상태에는 소유자 이름이 필요합니다.'); return; }
-			l.status = 'sold'; l.owner = owner; l.holdExpires = null;
-		}
-		saveState(); renderLockers(); hideAdminPanel();
-	}
-
-	function onAdminResetAction(){
-		if (!confirm('관리자: 사물함 상태를 초기화 하시겠습니까?')) return;
-		createInitial(); renderLockers(); hideAdminPanel();
-	}
-
-	function showModal(ids){
+	function showModal(ids) {
 		const modal = document.getElementById('modal');
-		document.getElementById('modalBody').textContent = `구매할 사물함: ${ids.join(', ')}\n구매를 진행하시겠습니까?`;
+		document.getElementById('modalBody').textContent =
+			`구매할 사물함: ${ids.join(', ')}\n구매를 진행하시겠습니까?`;
 		modal.style.display = 'flex';
 		modal.dataset.ids = JSON.stringify(ids);
 	}
 
-	function hideModal(){ document.getElementById('modal').style.display = 'none'; document.getElementById('modal').dataset.ids = ''; }
-
-	function onModalConfirm(){
-		const ids = JSON.parse(document.getElementById('modal').dataset.ids || '[]');
-		username = document.getElementById('username').value.trim();
-		if (!username){ alert('이름을 입력하세요.'); return; }
-		for (let id of ids){
-			const l = lockers[id-1];
-			if (l && l.status === 'held' && l.owner === username){
-				l.status = 'sold'; l.holdExpires = null; // owner stays
-			}
-		}
-		saveState(); renderLockers(); hideModal();
+	function hideModal() {
+		const modal = document.getElementById('modal');
+		modal.style.display = 'none';
+		modal.dataset.ids = '';
 	}
 
-	function onFindBest(){
+	async function onModalConfirm() {
+		const modal = document.getElementById('modal');
+		const ids = JSON.parse(modal.dataset.ids || '[]');
 		username = document.getElementById('username').value.trim();
-		if (!username){ alert('이름을 입력하세요.'); return; }
-		let qty = parseInt(document.getElementById('quantity').value,10);
-		// 한 사람당 1개 제한: 이미 보유중이면 더 이상 보유 못함
+		if (!username) {
+			alert('이름을 입력하세요.');
+			return;
+		}
+		for (let id of ids) {
+			await buyLocker(id);
+		}
+		hideModal();
+		// 안전하게 전체 상태 재조회
+		await loadState();
+	}
+
+	// 연속 좌석 찾기 (간단 버전: 첫 available 하나 잡기)
+	async function onFindBest() {
+		username = document.getElementById('username').value.trim();
+		if (!username) {
+			alert('이름을 입력하세요.');
+			return;
+		}
+		let qty = parseInt(document.getElementById('quantity').value, 10);
 		const existing = userHasActiveHold(username);
-		if (existing){ alert('이미 보유중입니다 — 한 사람당 최대 1개만 보유할 수 있습니다.'); return; }
-		if (qty > 1){ alert('한 사람당 최대 1개만 보유할 수 있으므로 수량을 1로 제한합니다.'); qty = 1; }
-		// find contiguous available block
-		let start = -1; let len = 0;
-		for (let i=0;i<lockers.length;i++){
-			if (lockers[i].status === 'available'){ if (start===-1) start=i; len++; } else { start=-1; len=0; }
-			if (len === qty) break;
+		if (existing) {
+			alert('이미 보유중입니다 — 한 사람당 최대 1개만 보유할 수 있습니다.');
+			return;
 		}
-		if (len === qty && start !== -1){
-			const ids = [];
-			for (let k=0;k<qty;k++){ const l = lockers[start+k]; l.status='held'; l.owner=username; l.holdExpires = Date.now()+HOLD_MS; ids.push(l.id); }
-			saveState(); renderLockers(); showModal(ids); return;
+		if (qty > 1) {
+			alert('한 사람당 최대 1개만 보유할 수 있으므로 수량을 1로 제한합니다.');
+			qty = 1;
 		}
-		// fallback: pick any available
-		const avail = lockers.filter(l=>l.status==='available').slice(0,qty);
-		if (avail.length === 0){ alert('사용 가능한 사물함이 없습니다.'); return; }
-		for (let l of avail){ l.status='held'; l.owner=username; l.holdExpires = Date.now()+HOLD_MS; }
-		const ids = avail.map(a=>a.id);
-		saveState(); renderLockers(); showModal(ids);
+
+		const availableLockers = lockers.filter(l => l.status === 'available');
+		if (availableLockers.length === 0) {
+			alert('사용 가능한 사물함이 없습니다.');
+			return;
+		}
+		const target = availableLockers[0]; // 제일 앞 좌석 하나
+		await holdLocker(target.id);
+		showModal([target.id]);
 	}
 
-	function onReset(){ if (!confirm('사물함 상태를 초기화 하시겠습니까?')) return; createInitial(); renderLockers(); }
-
-	function updateStats(){
-		const total = lockers.length;
-		const sold = lockers.filter(l=>l.status==='sold').length;
-		const held = lockers.filter(l=>l.status==='held').length;
-		document.getElementById('stats').textContent = `총 ${total}개 · 판매 ${sold} · 보유 ${held}`;
+	// 관리자 버튼
+	function onAdminBtn() {
+		const pass = prompt('관리자 비밀번호를 입력하세요');
+		if (pass === ADMIN_PASSWORD) {
+			isAdmin = true;
+			alert('관리자 모드 활성화되었습니다. 사물함을 클릭해 편집 패널을 열 수 있습니다.');
+		} else {
+			alert('비밀번호가 올바르지 않습니다.');
+		}
 	}
 
-	// 초기 실행
-	init();
+	function showAdminPanel(id) {
+		document.getElementById('adminPanel').style.display = 'flex';
+		document.getElementById('adminLockerId').value = id;
+		const l = lockers.find(x => x.id === id);
+		if (!l) return;
+		document.getElementById('adminStatus').value = l.status;
+		document.getElementById('adminOwner').value = l.owner || '';
+		if (l.holdExpires) {
+			document.getElementById('adminHoldSec').value =
+				Math.max(1, Math.ceil((l.holdExpires - Date.now()) / 1000));
+		} else {
+			document.getElementById('adminHoldSec').value = '';
+		}
+	}
+
+	function hideAdminPanel() {
+		document.getElementById('adminPanel').style.display = 'none';
+	}
+
+	// 개별 저장은 아직 서버에 반영하지 않음 (UI만)
+	function onAdminSave() {
+		alert('서버 연동 버전에서는 개별 편집은 아직 지원하지 않습니다.\n초기화 버튼만 사용 가능합니다.');
+	}
+
+	// 전체 초기화는 서버에 반영
+	async function onAdminResetAction() {
+		if (!confirm('관리자: 사물함 상태를 초기화 하시겠습니까?')) return;
+		try {
+			const res = await fetch(`${API_BASE}/reset`, { method: 'POST' });
+			if (!res.ok) {
+				const msg = await res.text();
+				alert(msg || '초기화에 실패했습니다.');
+				return;
+			}
+			await loadState();
+			hideAdminPanel();
+			alert('초기화 완료');
+		} catch (e) {
+			console.error('reset 오류', e);
+			alert('초기화 중 오류가 발생했습니다.');
+		}
+	}
+
+	function init() {
+		// username localStorage에서 복원
+		const savedName = localStorage.getItem('locker_username');
+		if (savedName) {
+			document.getElementById('username').value = savedName;
+			username = savedName;
+		}
+
+		document.getElementById('username').addEventListener('change', e => {
+			localStorage.setItem('locker_username', e.target.value);
+			username = e.target.value.trim();
+		});
+		document.getElementById('findBest').addEventListener('click', onFindBest);
+		document.getElementById('adminBtn').addEventListener('click', onAdminBtn);
+		document.getElementById('modalCancel').addEventListener('click', () => hideModal());
+		document.getElementById('modalConfirm').addEventListener('click', onModalConfirm);
+		document.getElementById('adminCancel').addEventListener('click', () => hideAdminPanel());
+		document.getElementById('adminSave').addEventListener('click', onAdminSave);
+		document.getElementById('adminResetAction').addEventListener('click', onAdminResetAction);
+
+		// 최초 1회 서버 상태 로드
+		loadState();
+
+		// 3초마다 서버에서 상태를 다시 읽어서(폴링) 다른 기기 변경 사항 반영
+		setInterval(loadState, 3000);
+
+		// 1초마다 카운트다운 텍스트만 갱신
+		setInterval(tick, 1000);
+	}
+
+	document.addEventListener('DOMContentLoaded', init);
 </script>
 </body>
 </html>
-
